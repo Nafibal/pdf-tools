@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pdf-edit</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: system-ui, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: #1c1c20;
+        color: #e8e8ea;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        background: #26262b;
+        border-bottom: 1px solid #3a3a40;
+      }
+      header .title { font-weight: 600; margin-right: 8px; }
+      button {
+        background: #3a3a42;
+        color: #e8e8ea;
+        border: 1px solid #4a4a52;
+        border-radius: 6px;
+        padding: 6px 14px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) { background: #4a4a54; }
+      button:disabled { opacity: 0.4; cursor: default; }
+      button.primary { background: #3a6ea5; border-color: #4a7eb5; }
+      button.primary:hover { background: #4a7eb5; }
+      #pageInfo { font-size: 13px; color: #a0a0a8; min-width: 70px; text-align: center; }
+      #status {
+        margin-left: auto;
+        font-size: 13px;
+        color: #a0a0a8;
+        max-width: 40vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      main {
+        flex: 1;
+        overflow: auto;
+        display: flex;
+        justify-content: center;
+        padding: 20px;
+      }
+      #canvasWrap { position: relative; height: fit-content; }
+      #pageCanvas {
+        display: block;
+        background: white;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+        cursor: text;
+      }
+      #editPopup {
+        position: absolute;
+        display: none;
+        z-index: 10;
+      }
+      #editPopup input {
+        font-family: Helvetica, Arial, sans-serif;
+        border: 2px solid #3a6ea5;
+        border-radius: 4px;
+        padding: 0 2px;
+        background: #fffde7;
+        color: #111;
+        outline: none;
+        width: 100%;
+      }
+      #editPopup .hint {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        font-size: 11px;
+        padding: 2px 4px;
+        margin-top: 2px;
+        border-radius: 4px;
+        background: #26262b;
+        white-space: nowrap;
+      }
+      #editPopup .hint.warn { color: #ffb347; }
+      #editPopup .hint .keys { color: #808088; }
+      #dropHint {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #808088;
+        font-size: 15px;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="title">pdf-edit</span>
+      <button id="openBtn">Open</button>
+      <input type="file" id="fileInput" accept="application/pdf" hidden />
+      <button id="undoBtn" disabled>Undo</button>
+      <button id="prevBtn" disabled>◀</button>
+      <span id="pageInfo">–</span>
+      <button id="nextBtn" disabled>▶</button>
+      <span style="flex: 1"></span>
+      <button id="exportBtn" class="primary" disabled>Export</button>
+      <span id="status"></span>
+    </header>
+    <main>
+      <div id="canvasWrap">
+        <canvas id="pageCanvas" width="0" height="0"></canvas>
+        <div id="editPopup">
+          <input type="text" id="editInput" />
+          <div class="hint" id="editHint"></div>
+        </div>
+        <div id="dropHint">Open a PDF to start — files never leave this machine.</div>
+      </div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

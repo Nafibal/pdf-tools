@@ -2,6 +2,9 @@
 // Validates the full edit pipeline in Node before any UI exists:
 //   fixture creation -> walker text extraction -> highlight annotation ->
 //   content-stream cover-and-redraw -> save -> reopen -> verify.
+// Also validates the engine APIs the toolbox Tools depend on:
+//   page grafting across documents (Merge), page-subset extraction (Split),
+//   and a Stamp annotation with an embedded image (Sign).
 import * as mupdf from "mupdf"
 
 const results: string[] = []
@@ -118,7 +121,123 @@ check("cover-and-redraw is permanent page content", newText.includes("9,999.99")
 const render3 = page3.toPixmap(mupdf.Matrix.scale(1, 1), mupdf.ColorSpace.DeviceRGB)
 check("reopened render matches pre-save render", diffRatio(afterEdit, render3) < 0.02, `diff ${(diffRatio(afterEdit, render3) * 100).toFixed(2)}%`)
 
+// ---------- 6. Merge capability: graft pages across documents ----------
+// The Merge domain function will reopen each input from bytes, graft every
+// page in list order into a fresh document, and save. Prove that flow here.
+const docAlpha = reopen(makeTextDoc(["Alpha page one"]))
+const docBravo = reopen(makeTextDoc(["Bravo page two", "Bravo page three"]))
+const alphaTextBefore = pageText(docAlpha.loadPage(0))
+const bravoTextsBefore = [0, 1].map((i) => pageText(docBravo.loadPage(i)))
+const merged = new mupdf.PDFDocument()
+merged.graftPage(0, docAlpha, 0)
+merged.graftPage(1, docBravo, 0)
+merged.graftPage(2, docBravo, 1)
+check("grafting did not modify source documents",
+  docAlpha.countPages() === 1 && pageText(docAlpha.loadPage(0)) === alphaTextBefore &&
+  docBravo.countPages() === 2 && bravoTextsBefore.every((t, i) => pageText(docBravo.loadPage(i)) === t),
+  `alpha=${docAlpha.countPages()} page, bravo=${docBravo.countPages()} pages, text intact`)
+const mergedReopened = reopen(merged)
+check("merged output has the summed page count", mergedReopened.countPages() === 3, `${mergedReopened.countPages()} pages`)
+const t0 = pageText(mergedReopened.loadPage(0))
+const t1 = pageText(mergedReopened.loadPage(1))
+const t2 = pageText(mergedReopened.loadPage(2))
+check("each source's text is extractable in graft order", t0.includes("Alpha") && t1.includes("Bravo page two") && t2.includes("Bravo page three"),
+  `[${t0}] [${t1}] [${t2}]`)
+
+// ---------- 7. Split capability: graft a page subset into a new document ----------
+// [2, 0] is non-contiguous and reversed on purpose: it proves the graft order
+// fully controls the output order, which the contiguous-range UI also needs.
+const docFour = reopen(makeTextDoc(["One", "Two", "Three", "Four"]))
+const subsetIndices = [2, 0]
+const subset = new mupdf.PDFDocument()
+subsetIndices.forEach((srcIndex, at) => subset.graftPage(at, docFour, srcIndex))
+check("grafting a page subset left the source document intact", docFour.countPages() === 4, `${docFour.countPages()} pages`)
+const subsetReopened = reopen(subset)
+check("subset output has exactly the requested page count", subsetReopened.countPages() === subsetIndices.length,
+  `${subsetReopened.countPages()} pages`)
+const s0 = pageText(subsetReopened.loadPage(0))
+const s1 = pageText(subsetReopened.loadPage(1))
+check("subset pages appear in requested order", s0.includes("Three") && s1.includes("One"), `[${s0}] [${s1}]`)
+
+// ---------- 8. Sign capability: Stamp annotation with an embedded image ----------
+// Build the signature-image fixture from the engine itself: a two-tone pixmap
+// encoded as PNG, so the probe needs no image assets on disk and a flat-filled
+// appearance stream cannot fake "the image renders". The engine stretches the
+// stamp image to the annotation rect, so aspect-ratio fitting is a domain concern.
+// Note: annotation rects via setRect/getRect are in fz page space (y-down,
+// top-left origin) — the same space highlight quads use; the engine flips to
+// PDF user space internally.
+const PURPLE = [120, 40, 200]
+const ORANGE = [255, 140, 0]
+const sigPm = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, 64, 32], false)
+{
+  const px = sigPm.getPixels()
+  for (let i = 0; i < px.length; i += 3) {
+    const leftHalf = (i / 3) % 64 < 32
+    const c = leftHalf ? PURPLE : ORANGE
+    px[i] = c[0]
+    px[i + 1] = c[1]
+    px[i + 2] = c[2]
+  }
+}
+const sigImage = new mupdf.Image(sigPm.asPNG())
+const signDoc = reopen(makeTextDoc(["Signature target page"]))
+const signPage = signDoc.loadPage(0)
+const stampRect: mupdf.Rect = [72, 300, 272, 400] // fz page space (y-down)
+const stamp = signPage.createAnnotation("Stamp")
+stamp.setRect(stampRect)
+stamp.setStampImage(sigImage)
+stamp.update()
+function stampRenders(pm: mupdf.Pixmap): boolean {
+  return sampleColorRatio(pm, leftHalfOf(stampRect), PURPLE) > 0.9 && sampleColorRatio(pm, rightHalfOf(stampRect), ORANGE) > 0.9
+}
+function stampRendersDetail(pm: mupdf.Pixmap): string {
+  return `purple ${sampleColorRatio(pm, leftHalfOf(stampRect), PURPLE).toFixed(3)} orange ${sampleColorRatio(pm, rightHalfOf(stampRect), ORANGE).toFixed(3)}`
+}
+const stampPm = signPage.toPixmap(mupdf.Matrix.scale(1, 1), mupdf.ColorSpace.DeviceRGB)
+check("stamp image renders inside its rect pre-save", stampRenders(stampPm), stampRendersDetail(stampPm))
+
+const signReopened = reopen(signDoc)
+const signPageReopened = signReopened.loadPage(0)
+const stampAnnots = signPageReopened.getAnnotations().filter((a) => a.getType() === "Stamp")
+check("reopened file reports the annotation as a Stamp", stampAnnots.length === 1,
+  `annots: ${signPageReopened.getAnnotations().map((a) => a.getType()).join(",")}`)
+check("stamp rect survives save", stampAnnots.length === 1 && rectsClose(stampAnnots[0].getRect(), stampRect),
+  stampAnnots.length === 1 ? `rect=${stampAnnots[0].getRect()}` : "no stamp")
+const stampPm2 = signPageReopened.toPixmap(mupdf.Matrix.scale(1, 1), mupdf.ColorSpace.DeviceRGB)
+check("reopened stamp renders the image inside its rect", stampRenders(stampPm2), stampRendersDetail(stampPm2))
+// The image must be confined to the annotation rect: the bands above, below,
+// and beside it (fixtures are 612x792) carry none of the image's colors.
+const outsideBands: mupdf.Rect[] = [
+  [0, 0, 612, stampRect[1]],
+  [0, stampRect[3], 612, 792],
+  [0, stampRect[1], stampRect[0], stampRect[3]],
+  [stampRect[2], stampRect[1], 612, stampRect[3]],
+]
+check("no stamp ink outside its rect",
+  outsideBands.every((band) => sampleColorRatio(stampPm2, band, PURPLE) === 0 && sampleColorRatio(stampPm2, band, ORANGE) === 0),
+  `4 bands outside rect clean`)
+
 // ---------- helpers ----------
+function makeTextDoc(pageTexts: string[]): mupdf.PDFDocument {
+  const doc = new mupdf.PDFDocument()
+  const fontRef = doc.addSimpleFont(new mupdf.Font("Helvetica"), "Latin")
+  pageTexts.forEach((text, i) => {
+    const content = `q BT /F1 24 Tf 0 0 0 rg 72 720 Td (${text}) Tj ET Q`
+    const pageObj = doc.addPage([0, 0, 612, 792], 0, { Font: { F1: fontRef } }, content)
+    doc.insertPage(i, pageObj)
+  })
+  return doc
+}
+
+function reopen(doc: mupdf.PDFDocument): mupdf.PDFDocument {
+  return new mupdf.PDFDocument(doc.saveToBuffer("garbage=1").asUint8Array().slice())
+}
+
+function pageText(page: mupdf.PDFPage): string {
+  return extractLines(page).map((l) => l.text).join("|")
+}
+
 function appendContentStream(doc: mupdf.PDFDocument, pageObj: mupdf.PDFObject, ops: string, fontRef: mupdf.PDFObject): void {
   const newStream = doc.addStream(ops, {})
   const contents = pageObj.get("Contents")
@@ -161,6 +280,38 @@ function diffRatio(a: mupdf.Pixmap, b: mupdf.Pixmap): number {
   let diff = 0
   for (let i = 0; i < pa.length; i += 100) if (Math.abs(pa[i] - pb[i]) > 8) diff++
   return diff / (pa.length / 100)
+}
+
+function sampleColorRatio(pm: mupdf.Pixmap, rect: mupdf.Rect, rgb: number[]): number {
+  // Fraction of pixels in the fz-space rect within tolerance of the RGB color.
+  let hit = 0
+  let total = 0
+  const x0 = Math.max(0, Math.floor(Math.min(rect[0], rect[2])))
+  const y0 = Math.max(0, Math.floor(Math.min(rect[1], rect[3])))
+  const x1 = Math.min(pm.getWidth(), Math.ceil(Math.max(rect[0], rect[2])))
+  const y1 = Math.min(pm.getHeight(), Math.ceil(Math.max(rect[1], rect[3])))
+  const px = pm.getPixels()
+  const stride = pm.getStride()
+  const comps = pm.getNumberOfComponents()
+  for (let y = y0; y < y1; y += 2)
+    for (let x = x0; x < x1; x += 2) {
+      total++
+      const o = y * stride + x * comps
+      if (Math.abs(px[o] - rgb[0]) <= 12 && Math.abs(px[o + 1] - rgb[1]) <= 12 && Math.abs(px[o + 2] - rgb[2]) <= 12) hit++
+    }
+  return total === 0 ? 0 : hit / total
+}
+
+function rectsClose(a: mupdf.Rect, b: mupdf.Rect): boolean {
+  return a.every((v, i) => Math.abs(v - b[i]) < 0.01)
+}
+
+function leftHalfOf(r: mupdf.Rect): mupdf.Rect {
+  return [r[0], r[1], (r[0] + r[2]) / 2, r[3]]
+}
+
+function rightHalfOf(r: mupdf.Rect): mupdf.Rect {
+  return [(r[0] + r[2]) / 2, r[1], r[2], r[3]]
 }
 
 function sampleDarkRatio(pm: mupdf.Pixmap, rect: mupdf.Rect): number {
